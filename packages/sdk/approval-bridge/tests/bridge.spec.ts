@@ -118,20 +118,14 @@ describe('ApprovalBridge', () => {
 })
 
 describe('sdk-approval-bridge plugin', () => {
-  it('registers capability, method, request listener; cancels on shutdown', async () => {
+  it('registers capability, method, request listener; cancels pending on shutdown', async () => {
     const rpc = fakeRpc()
     const listeners = new Map<string, (...args: unknown[]) => unknown>()
-    const disposeEffect = vi.fn()
     const ctx = {
       sdkJsonRpc: rpc,
       on: vi.fn((event: string, handler: (...args: unknown[]) => unknown) => {
         listeners.set(event, handler)
         return () => { listeners.delete(event) }
-      }),
-      effect: vi.fn((factory: () => () => void) => {
-        const cleanup = factory()
-        disposeEffect.mockImplementation(cleanup)
-        return () => undefined
       }),
     }
 
@@ -156,10 +150,5 @@ describe('sdk-approval-bridge plugin', () => {
     const pending = request({ agent: { session: { id: 'shut' } }, toolName: 'write' })
     rpc.shutdownHooks[0]!()
     await expect(pending).resolves.toBe('cancelled')
-
-    disposeEffect()
-    expect(rpc.capabilities.has('approval/respond')).toBe(false)
-    expect(rpc.methods.has('approval/respond')).toBe(false)
-    expect(listeners.has('approval/request')).toBe(false)
   })
 })

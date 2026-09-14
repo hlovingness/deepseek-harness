@@ -24,18 +24,9 @@ export const inject = ['sdkJsonRpc']
 /** Register the approval bridge on the shared SDK JSON-RPC channel. */
 export function apply(ctx: Context): void {
   const bridge = new ApprovalBridge(ctx.sdkJsonRpc)
-
-  ctx.effect(() => {
-    const offCapability = ctx.sdkJsonRpc.addCapability('approval/respond')
-    const offMethod = ctx.sdkJsonRpc.registerMethod('approval/respond', params => bridge.respond(params))
-    const offShutdown = ctx.sdkJsonRpc.onShutdown(() => bridge.cancelAll('cancelled'))
-    const offRequest = ctx.on('approval/request', req => bridge.handle(req))
-    return () => {
-      offRequest()
-      offShutdown()
-      offMethod()
-      offCapability()
-      bridge.cancelAll('cancelled')
-    }
-  }, 'sdk-approval-bridge')
+  ctx.sdkJsonRpc.addCapability('approval/respond')
+  ctx.sdkJsonRpc.registerMethod('approval/respond', params => bridge.respond(params))
+  ctx.sdkJsonRpc.onShutdown(() => bridge.cancelAll('cancelled'))
+  // Listener is fiber-scoped; process exit / server shutdown clears the rest.
+  ctx.on('approval/request', req => bridge.handle(req))
 }

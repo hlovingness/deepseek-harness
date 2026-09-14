@@ -34,7 +34,6 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/dsh-agent-presets": "workspace:^",
     "@deepseek-ai/dsh-cmdline": "workspace:^",
     "@deepseek-ai/dsh-sdk-approval-bridge": "workspace:^",
     "@deepseek-ai/dsh-sdk-jsonrpc-server": "workspace:^",
