@@ -7881,6 +7881,9 @@ importers:
       '@deepseek-ai/dsh-sdk-protocol':
         specifier: workspace:^
         version: link:../protocol
+      '@deepseek-ai/dsh-user-approval':
+        specifier: workspace:^
+        version: link:../../interaction/user-approval
 
   packages/sdk/client:
     dependencies:

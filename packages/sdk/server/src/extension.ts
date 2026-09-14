@@ -5,6 +5,10 @@
  * @module @deepseek-ai/dsh-sdk-jsonrpc-server/extension
  */
 
+// Ensure `@deepseek-ai/cordis` resolves as a real module before augmentation
+// (bare `declare module` would otherwise create an ambient shadow Context).
+import type {} from '@deepseek-ai/cordis'
+
 /** Handler for one client→server JSON-RPC method registered by an extension. */
 export type SdkJsonRpcMethodHandler = (
   params: Record<string, unknown> | undefined,

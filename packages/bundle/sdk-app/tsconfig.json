@@ -16,6 +16,12 @@
     },
     {
       "path": "../../boot/cmdline"
+    },
+    {
+      "path": "../../sdk/approval-bridge"
+    },
+    {
+      "path": "../../sdk/server"
     }
   ]
 }

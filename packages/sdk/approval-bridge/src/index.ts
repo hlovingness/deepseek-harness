@@ -10,6 +10,8 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+// Pull Host `approval/request` Events augmentation (types only).
+import type {} from '@deepseek-ai/dsh-user-approval'
 import { ApprovalBridge } from './bridge.ts'
 
 export { ApprovalBridge } from './bridge.ts'

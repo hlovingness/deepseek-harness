@@ -73,7 +73,11 @@ export class ApprovalBridge {
       }
 
       const onAbort = () => settle('cancelled')
-      this.pending.set(id, { resolve: settle, signal, onAbort })
+      this.pending.set(id, {
+        resolve: settle,
+        onAbort,
+        ...(signal === undefined ? {} : { signal }),
+      })
       if (signal !== undefined) {
         signal.addEventListener('abort', onAbort, { once: true })
       }
