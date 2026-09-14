@@ -103,12 +103,51 @@ export interface SubagentFinishedNotification {
   lastAssistantMessage?: ContentBlock[]
 }
 
+/**
+ * Desktop/native extension: ask the out-of-process client to approve a tool
+ * call. Correlates with a later {@link ApprovalRespondParams} via `id`.
+ * Host outcome vocabulary stays one-shot (`allowed-once` / `rejected`);
+ * durable "remember" grants are not part of this wire shape.
+ */
+export interface ApprovalRequireNotification {
+  /** Correlation id for a matching `approval/respond`. */
+  id: string
+  /** Session whose agent needs the decision. */
+  sessionId: string
+  /** Tool name being decided. */
+  toolName: string
+  /** Optional asker-supplied explanation (also accepted as `reason` by some clients). */
+  summary?: string
+  /** Exact tool call id when the asker had one. */
+  callId?: string
+}
+
+/** Desktop/native extension: client decision for a prior `approval.require`. */
+export interface ApprovalRespondParams {
+  /** Correlation id from {@link ApprovalRequireNotification.id}. */
+  approvalId: string
+  /** One-shot grant or reject. */
+  decision: 'allow' | 'deny'
+  /** Optional human-readable note (audit / UI only). */
+  reason?: string
+  /**
+   * Client may send this for UI parity with Web; the SDK host currently
+   * ignores it because user-approval only supports one-shot grants.
+   */
+  remember?: boolean
+}
+
+/** Empty result for a settled approval decision. */
+export type ApprovalRespondResult = Record<string, never>
+
 /** Server-to-client notifications by JSON-RPC method name. */
 export interface HarnessSdkNotificationMap {
   'session.event': SessionEventNotification
   'session.status': SessionStatusNotification
   'subagent.started': SubagentStartedNotification
   'subagent.finished': SubagentFinishedNotification
+  /** Desktop/native: interactive tool approval prompt. */
+  'approval.require': ApprovalRequireNotification
 }
 
 /** Client-to-server request methods with their param and result shapes. */
@@ -116,4 +155,6 @@ export interface HarnessSdkRequestMap {
   'initialize': { params: InitializeParams; result: InitializeResult }
   'session/prompt': { params: SessionPromptParams; result: SessionPromptResult }
   'shutdown': { params: undefined; result: Record<string, never> }
+  /** Desktop/native: answer a prior `approval.require`. */
+  'approval/respond': { params: ApprovalRespondParams; result: ApprovalRespondResult }
 }

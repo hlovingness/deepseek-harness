@@ -60,6 +60,9 @@ export function apply(ctx: Context, config: JsonRpcConfig): void {
   const server = new HarnessSdkJsonRpcServer(ctx, transport, {
     maxTokensAsSuccess: resolvedConfig.maxTokensAsSuccess,
   })
+  // Sibling plugins (approval-bridge, …) inject this to register methods /
+  // capabilities without replacing the primary `onRequest` dispatcher.
+  ctx.provide('sdkJsonRpc', server.asExtensionApi())
 
   // Share one exit task so racing shutdown requests cannot dispose the root or
   // exit the process more than once.

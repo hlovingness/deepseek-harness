@@ -1074,6 +1074,62 @@ describe('HarnessSdkJsonRpcServer', () => {
     }
   })
 
+  it('dispatches extension-registered methods and merges capabilities', async () => {
+    const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-ext-'))
+    const llmServer = await mockCompletionServer()
+    vi.stubEnv('DEEPSEEK_API_KEY', 'test-key')
+    vi.stubEnv('DEEPSEEK_BASE_URL', llmServer.url)
+    const ctx = await makeHarness(storageDir)
+    try {
+      await ctx.plugin(LlmDeepSeek, {})
+      const transport = new FakeTransport()
+      const server = new HarnessSdkJsonRpcServer(ctx, transport)
+      const api = server.asExtensionApi()
+      const calls: unknown[] = []
+      const offMethod = api.registerMethod('ext/echo', (params) => {
+        calls.push(params)
+        return { ok: true }
+      })
+      const offCapability = api.addCapability('ext/echo')
+      api.notify('ext.ping', { n: 1 })
+      expect(transport.notifications).toContainEqual({ method: 'ext.ping', params: { n: 1 } })
+
+      await expect(server.handleRequest('ext/echo', { q: 'hi' })).resolves.toEqual({ ok: true })
+      expect(calls).toEqual([{ q: 'hi' }])
+
+      const init = await server.handleRequest('initialize', {
+        cwd: storageDir,
+        provider: 'deepseek-official',
+        model: 'deepseek-chat',
+      }) as { capabilities: string[] }
+      expect(init.capabilities).toContain('ext/echo')
+      expect(init.capabilities).toContain('agent/stop')
+      expect(init.capabilities).not.toContain('approval/respond')
+
+      offMethod()
+      offCapability()
+      await expect(server.handleRequest('ext/echo', {})).rejects.toThrow(/unknown DeepSeek Harness SDK runtime method/)
+      await server.shutdown()
+    } finally {
+      await ctx.fiber.dispose()
+      await rm(storageDir, { recursive: true, force: true })
+    }
+  })
+
+  it('runs extension onShutdown hooks before tearing down sessions', async () => {
+    const ctx = {
+      on: vi.fn(() => () => undefined),
+      agents: { create: vi.fn(), get: () => undefined },
+      get: () => undefined,
+    } as unknown as Context
+    const server = new HarnessSdkJsonRpcServer(ctx, new FakeTransport())
+    const hook = vi.fn()
+    const off = server.asExtensionApi().onShutdown(hook)
+    await server.shutdown()
+    expect(hook).toHaveBeenCalledOnce()
+    off()
+  })
+
   it('rejects unknown JSON-RPC runtime methods', async () => {
     const storageDir = await mkdtemp(join(tmpdir(), 'dsh-jsonrpc-unknown-'))
     const ctx = await makeHarness(storageDir)

@@ -15,8 +15,21 @@
       config:
         profile: sdk
 
+    # Desktop / SDK clients: per-session preset composition (standard/ptc/minimal/cordis)
+    # so creator-mode chip and plugin-inventory preset groups work over stdio.
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard
+
     - id: sdk-jsonrpc-server
       name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
       inject: [sdkAppStartup, loader]
       config:
         maxTokensAsSuccess: !!js "process.env.DSH_MAX_TOKENS_AS_SUCCESS === undefined ? true : JSON.parse(process.env.DSH_MAX_TOKENS_AS_SUCCESS)"
+
+    # Desktop / SDK clients: bridge Host approval/request → approval.require / approval/respond
+    # on the shared JSON-RPC channel (not baked into the server core).
+    - id: sdk-approval-bridge
+      name: '@deepseek-ai/dsh-sdk-approval-bridge'
+      inject: [sdkJsonRpc]

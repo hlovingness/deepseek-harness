@@ -5,7 +5,7 @@
  * @module @deepseek-ai/dsh-sdk-jsonrpc-server/server
  */
 
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, FiberState } from '@deepseek-ai/cordis'
 import { resolve } from 'node:path'
 import { brandString } from '@deepseek-ai/dsh-brand'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
@@ -27,6 +27,39 @@ import type {
   SubagentFinishedNotification,
   SubagentStartedNotification,
 } from '@deepseek-ai/dsh-sdk-protocol'
+import type { SdkJsonRpc, SdkJsonRpcMethodHandler } from './extension.ts'
+
+export type { SdkJsonRpc, SdkJsonRpcMethodHandler } from './extension.ts'
+
+/** Optional agent-presets roster (present when the deployment mounts it). */
+interface AgentPresetsService {
+  mount(agentCtx: Context, id?: string): Promise<{ id: string }>
+  select(agent: Agent, agentPreset: string): Promise<string>
+  compositionInventory(): Promise<readonly {
+    id: string
+    trust: 'system' | 'user'
+    name?: string
+    isDefault: boolean
+    broken?: string
+    rows: readonly {
+      entryId: string | null
+      moduleName: string
+      enabled: boolean | 'conditional'
+      condition?: string
+      fiberState?: FiberState
+    }[]
+  }[]>
+}
+
+/** Fiber phase labels aligned with host plugin-inventory. */
+const FIBER_PHASE: Record<number, string | null> = {
+  0: 'pending',
+  1: 'loading',
+  2: 'active',
+  3: 'failed',
+  4: null,
+  5: 'unloading',
+}
 
 interface SessionRecord {
   handle: AgentHandle
@@ -81,6 +114,13 @@ export class HarnessSdkJsonRpcServer {
   private llmFiber: { dispose(): Promise<void> } | undefined
   private readonly sessions = new Map<string, SessionRecord>()
   private readonly sessionCreations = new Map<string, Promise<SessionRecord>>()
+  /** sessionId → preset id to mount on first create (creator chip / explicit select). */
+  private readonly pendingPresets = new Map<string, string>()
+  /** Sibling-plugin JSON-RPC methods (see {@link SdkJsonRpc.registerMethod}). */
+  private readonly extensionMethods = new Map<string, SdkJsonRpcMethodHandler>()
+  /** Extra `initialize.capabilities` entries from sibling plugins. */
+  private readonly extensionCapabilities = new Set<string>()
+  private readonly shutdownHooks: Array<() => void> = []
   private readonly disposers: (() => void)[] = []
   private shutdownTask: Promise<Record<string, never>> | undefined
   private shuttingDown = false
@@ -127,6 +167,39 @@ export class HarnessSdkJsonRpcServer {
     }))
   }
 
+  /** Expose the sibling-plugin extension surface (provided as `ctx.sdkJsonRpc`). */
+  asExtensionApi(): SdkJsonRpc {
+    return {
+      notify: (method, params) => this.transport.notify(method, params),
+      registerMethod: (method, handler) => this.registerMethod(method, handler),
+      addCapability: capability => this.addCapability(capability),
+      onShutdown: hook => this.onShutdown(hook),
+    }
+  }
+
+  /** Register a sibling-plugin JSON-RPC method. Core methods always win. */
+  registerMethod(method: string, handler: SdkJsonRpcMethodHandler): () => void {
+    this.extensionMethods.set(method, handler)
+    return () => {
+      if (this.extensionMethods.get(method) === handler) this.extensionMethods.delete(method)
+    }
+  }
+
+  /** Advertise an extra capability string on subsequent `initialize` results. */
+  addCapability(capability: string): () => void {
+    this.extensionCapabilities.add(capability)
+    return () => { this.extensionCapabilities.delete(capability) }
+  }
+
+  /** Register a hook invoked at the start of {@link shutdown}. */
+  onShutdown(hook: () => void): () => void {
+    this.shutdownHooks.push(hook)
+    return () => {
+      const i = this.shutdownHooks.indexOf(hook)
+      if (i >= 0) this.shutdownHooks.splice(i, 1)
+    }
+  }
+
   /**
    * Validate and configure the SDK route, mounting the DeepSeek fallback only when unowned.
    * @param params - SDK handshake parameters.
@@ -165,7 +238,16 @@ export class HarnessSdkJsonRpcServer {
     this.reasoningEffort = reasoningEffort
     this.maxTokens = params.maxTokens
     this.initialized = true
-    return { serverInfo: { name: 'deepseek-harness-sdk-runtime', version: '0.0.1' } }
+    const capabilities = ['pluginInventory/list', 'agent/stop', 'agent/cancel', ...this.extensionCapabilities]
+    if (this.ctx.get('agentPresets') !== undefined) {
+      capabilities.push('agentPresets/select')
+    }
+    // Extra `capabilities` string[] is a desktop/native extension on top of the
+    // wire-stable InitializeResult; official SDK clients ignore unknown fields.
+    return {
+      serverInfo: { name: 'deepseek-harness-sdk-runtime', version: '0.0.1' },
+      capabilities,
+    } as InitializeResult & { capabilities: string[] }
   }
 
   /**
@@ -173,8 +255,12 @@ export class HarnessSdkJsonRpcServer {
    * @param params - target session and user content.
    * @returns the durable message identity.
    */
-  async prompt(params: SessionPromptParams): Promise<SessionPromptResult> {
+  async prompt(params: SessionPromptParams & { agentPreset?: string }): Promise<SessionPromptResult> {
     if (!this.initialized) throw new Error('SDK server is not initialized')
+    const staged = typeof params.agentPreset === 'string' && params.agentPreset.length > 0
+      ? params.agentPreset
+      : undefined
+    if (staged !== undefined) this.pendingPresets.set(params.sessionId, staged)
     const rec = await this.getOrCreateSession(params.sessionId)
     // An agent-loop-only reload disposes the loop's agents while this record
     // survives; a retained agent accepts followup() silently, so validate the
@@ -210,6 +296,9 @@ export class HarnessSdkJsonRpcServer {
 
   private async performShutdown(): Promise<Record<string, never>> {
     this.shuttingDown = true
+    for (const hook of [...this.shutdownHooks]) {
+      try { hook() } catch { /* extension shutdown hooks must not block teardown */ }
+    }
     const pendingCreations = [...this.sessionCreations.values()]
     await Promise.allSettled(pendingCreations)
     this.sessionCreations.clear()
@@ -248,12 +337,125 @@ export class HarnessSdkJsonRpcServer {
       case 'initialize':
         return this.initialize(params as unknown as InitializeParams)
       case 'session/prompt':
-        return this.prompt(params as unknown as SessionPromptParams)
+        return this.prompt(params as unknown as SessionPromptParams & { agentPreset?: string })
+      case 'pluginInventory/list':
+        return this.listPluginInventory()
+      case 'agentPresets/select':
+        return this.selectAgentPreset(params)
+      case 'agent/stop':
+      case 'agent/cancel':
+        return this.stopAgent(params)
       case 'shutdown':
         return this.shutdown()
-      default:
+      default: {
+        const extension = this.extensionMethods.get(method)
+        if (extension !== undefined) return extension(params)
         throw new Error(`unknown DeepSeek Harness SDK runtime method: ${method}`)
+      }
     }
+  }
+
+
+  /**
+   * Interrupt the live agent for a session (user Stop). Maps to `Agent.cancel`.
+   * @param params - `{ sessionId }`
+   */
+  private stopAgent(params: Record<string, unknown> | undefined): Record<string, never> {
+    const sessionId = typeof params?.sessionId === 'string' ? params.sessionId : ''
+    if (!sessionId) throw new Error('agent/stop requires sessionId')
+    const rec = this.sessions.get(sessionId)
+    if (rec === undefined) {
+      // No live agent yet (prompt not delivered) — nothing to interrupt.
+      return {}
+    }
+    this.assertLiveAgent(rec, sessionId)
+    rec.handle.agent.cancel({ kind: 'user' })
+    return {}
+  }
+
+  /**
+   * Loader inventory for desktop settings (same projection as Host
+   * `pluginInventory/list`). Uses the live Loader; when agent-presets is
+   * mounted, also returns per-preset composition rows.
+   */
+  private async listPluginInventory(): Promise<{
+    entries: {
+      entryId: string
+      moduleName: string
+      enabled: boolean
+      fiberPhase: string | null
+    }[]
+    agentPresets?: {
+      id: string
+      trust: 'system' | 'user'
+      name?: string
+      isDefault: boolean
+      broken?: string
+      rows: {
+        entryId: string | null
+        moduleName: string
+        enabled: boolean | 'conditional'
+        condition?: string
+        fiberPhase: string | null
+      }[]
+    }[]
+  }> {
+    const loader = this.ctx.get('loader')
+    const entries: {
+      entryId: string
+      moduleName: string
+      enabled: boolean
+      fiberPhase: string | null
+    }[] = []
+    if (loader !== undefined) {
+      for (const entry of loader.entries()) {
+        if (entry.options.group) continue
+        entries.push({
+          entryId: entry.id,
+          moduleName: entry.options.name,
+          enabled: !entry.disabled,
+          fiberPhase: entry.fiber === undefined
+            ? null
+            : (FIBER_PHASE[entry.fiber.state as number] ?? null),
+        })
+      }
+    }
+    const presets = this.ctx.get('agentPresets') as AgentPresetsService | undefined
+    if (presets === undefined) return { entries }
+    const agentPresets = (await presets.compositionInventory()).map(composition => ({
+      ...composition,
+      rows: composition.rows.map(({ fiberState, ...row }) => ({
+        ...row,
+        fiberPhase: fiberState === undefined ? null : (FIBER_PHASE[fiberState as number] ?? null),
+      })),
+    }))
+    return { entries, agentPresets }
+  }
+
+  /**
+   * Compose a blank session onto another preset (creator chip / picker).
+   * Stages the id when the session agent does not exist yet; otherwise calls
+   * the roster's Remote `select`.
+   */
+  private async selectAgentPreset(
+    params: Record<string, unknown> | undefined,
+  ): Promise<{ agentPreset: string }> {
+    const sessionId = typeof params?.['sessionId'] === 'string' ? params['sessionId'] : ''
+    const agentPreset = typeof params?.['agentPreset'] === 'string' ? params['agentPreset'] : ''
+    if (!sessionId || !agentPreset) {
+      throw new Error('agentPresets/select requires sessionId and agentPreset')
+    }
+    const presets = this.ctx.get('agentPresets') as AgentPresetsService | undefined
+    if (presets === undefined) {
+      throw new Error('agentPresets/select requires @deepseek-ai/dsh-agent-presets in the deployment')
+    }
+    const existing = this.sessions.get(sessionId)
+    if (existing === undefined) {
+      this.pendingPresets.set(sessionId, agentPreset)
+      return { agentPreset }
+    }
+    const applied = await presets.select(existing.handle.agent, agentPreset)
+    return { agentPreset: applied }
   }
 
   private async getOrCreateSession(sessionId: string): Promise<SessionRecord> {
@@ -272,19 +474,30 @@ export class HarnessSdkJsonRpcServer {
   }
 
   private async createSession(sessionId: string): Promise<SessionRecord> {
-    // No preset composition: this server's compositions keep the model-facing
-    // rows in the host plane, so this agent reads them from the global layer. A
-    // deployment that configures a roster has to join one here first
-    // (@deepseek-ai/dsh-agent-presets README, "Composing a child agent").
+    const presets = this.ctx.get('agentPresets') as AgentPresetsService | undefined
+    const staged = this.pendingPresets.get(sessionId)
+    this.pendingPresets.delete(sessionId)
+    // When a roster is mounted, compose each SDK session from the staged
+    // preset (creator chip) or the roster default — same contract as Web.
     const handle = await this.ctx.agents.create({
       sessionId: brandString<SessionId>(sessionId),
-      meta: { cwd: this.cwd },
+      meta: {
+        cwd: this.cwd,
+        ...staged === undefined ? {} : { agentPreset: staged },
+      },
       agentOptions: {
         provider: this.provider,
         model: this.model,
         ...this.reasoningEffort === undefined ? {} : { reasoningEffort: this.reasoningEffort },
         ...this.maxTokens === undefined ? {} : { maxTokens: this.maxTokens },
       },
+      ...presets === undefined
+        ? {}
+        : {
+          setup: async (agentCtx: Context) => {
+            await presets.mount(agentCtx, staged)
+          },
+        },
     })
     const rec: SessionRecord = { handle }
     this.sessions.set(sessionId, rec)
