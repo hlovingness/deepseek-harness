@@ -1802,9 +1802,6 @@ importers:
 
   packages/bundle/sdk-app:
     dependencies:
-      '@deepseek-ai/dsh-agent-presets':
-        specifier: workspace:^
-        version: link:../../preset/agent-presets
       '@deepseek-ai/dsh-cmdline':
         specifier: workspace:^
         version: link:../../boot/cmdline
