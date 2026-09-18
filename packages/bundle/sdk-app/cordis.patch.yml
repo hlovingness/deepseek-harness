@@ -27,3 +27,9 @@
     - id: sdk-approval-bridge
       name: '@deepseek-ai/dsh-sdk-approval-bridge'
       inject: [sdkJsonRpc]
+
+    # Desktop / SDK clients: mirror agent/assistant-stream → transient assistant/live-chunk
+    # session.event (Web ClientAssistantStream parity; not durable log).
+    - id: sdk-assistant-stream-bridge
+      name: '@deepseek-ai/dsh-sdk-assistant-stream-bridge'
+      inject: [sdkJsonRpc]

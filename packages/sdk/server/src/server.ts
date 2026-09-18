@@ -102,8 +102,9 @@ function successStatus(reason: string, options: HarnessSdkJsonRpcServerOptions):
 
 /**
  * SDK server over one booted harness context and transport peer. Construction
- * subscribes to session, agent, and subagent lifecycle events until shutdown;
- * reinitialization is unsupported.
+ * subscribes to session, agent, and subagent lifecycle events until shutdown.
+ * `initialize` may be called again to refresh the default route; prefer
+ * `models/set` to hot-switch and recycle live agents under the new model.
  */
 export class HarnessSdkJsonRpcServer {
   private cwd = process.cwd()
@@ -238,7 +239,13 @@ export class HarnessSdkJsonRpcServer {
     this.reasoningEffort = reasoningEffort
     this.maxTokens = params.maxTokens
     this.initialized = true
-    const capabilities = ['pluginInventory/list', 'agent/stop', 'agent/cancel', ...this.extensionCapabilities]
+    const capabilities = [
+      'pluginInventory/list',
+      'agent/stop',
+      'agent/cancel',
+      'models/set',
+      ...this.extensionCapabilities,
+    ]
     if (this.ctx.get('agentPresets') !== undefined) {
       capabilities.push('agentPresets/select')
     }
@@ -338,6 +345,8 @@ export class HarnessSdkJsonRpcServer {
         return this.initialize(params as unknown as InitializeParams)
       case 'session/prompt':
         return this.prompt(params as unknown as SessionPromptParams & { agentPreset?: string })
+      case 'models/set':
+        return this.setModels(params)
       case 'pluginInventory/list':
         return this.listPluginInventory()
       case 'agentPresets/select':
@@ -473,32 +482,92 @@ export class HarnessSdkJsonRpcServer {
     return creation
   }
 
+  /**
+   * Hot-switch the process-wide SDK route without restarting the sidecar.
+   * Live agents are disposed so the next `session/prompt` resumes them under
+   * the new provider/model (aligned with Host `session.selectModel` intent).
+   */
+  async setModels(params: Record<string, unknown> | undefined): Promise<{
+    provider: string
+    model: string
+    reasoningEffort?: string
+  }> {
+    if (!this.initialized) throw new Error('SDK server is not initialized')
+    const provider = typeof params?.provider === 'string' ? params.provider : ''
+    const model = typeof params?.model === 'string' ? params.model : ''
+    if (!provider || !model) throw new Error('models/set requires provider and model')
+    const effortRaw = params?.reasoningEffort
+    if (effortRaw !== undefined
+      && (typeof effortRaw !== 'string' || effortRaw.length === 0)) {
+      throw new TypeError('models/set reasoningEffort must be a non-empty string')
+    }
+    const reasoningEffort = effortRaw === undefined
+      ? undefined
+      : ReasoningEffortId(effortRaw)
+    if (!this.hasAdapterFor(provider)) {
+      if (provider !== 'deepseek-official') throw new Error(`no adapter registered for provider "${provider}"`)
+      this.llmFiber = await this.ctx.plugin(LlmDeepSeek)
+    }
+    const llm = this.ctx.get('llm') as LlmRuntime
+    await llm.resolveCallConfig({
+      provider,
+      model,
+      ...reasoningEffort === undefined ? {} : { reasoningEffort },
+      ...this.maxTokens === undefined ? {} : { maxTokens: this.maxTokens },
+    })
+    this.provider = provider
+    this.model = model
+    this.reasoningEffort = reasoningEffort
+
+    const live = [...this.sessions.entries()]
+    this.sessions.clear()
+    await Promise.allSettled(live.map(([, rec]) => Promise.resolve().then(() => rec.handle.dispose())))
+
+    return {
+      provider,
+      model,
+      ...reasoningEffort === undefined ? {} : { reasoningEffort },
+    }
+  }
+
   private async createSession(sessionId: string): Promise<SessionRecord> {
     const presets = this.ctx.get('agentPresets') as AgentPresetsService | undefined
     const staged = this.pendingPresets.get(sessionId)
     this.pendingPresets.delete(sessionId)
-    // When a roster is mounted, compose each SDK session from the staged
-    // preset (creator chip) or the roster default — same contract as Web.
-    const handle = await this.ctx.agents.create({
-      sessionId: brandString<SessionId>(sessionId),
-      meta: {
-        cwd: this.cwd,
-        ...staged === undefined ? {} : { agentPreset: staged },
-      },
-      agentOptions: {
-        provider: this.provider,
-        model: this.model,
-        ...this.reasoningEffort === undefined ? {} : { reasoningEffort: this.reasoningEffort },
-        ...this.maxTokens === undefined ? {} : { maxTokens: this.maxTokens },
-      },
-      ...presets === undefined
-        ? {}
-        : {
-          setup: async (agentCtx: Context) => {
-            await presets.mount(agentCtx, staged)
-          },
+    const id = brandString<SessionId>(sessionId)
+    const agentOptions = {
+      provider: this.provider,
+      model: this.model,
+      ...this.reasoningEffort === undefined ? {} : { reasoningEffort: this.reasoningEffort },
+      ...this.maxTokens === undefined ? {} : { maxTokens: this.maxTokens },
+    }
+    const setup = presets === undefined
+      ? undefined
+      : async (agentCtx: Context) => {
+        await presets.mount(agentCtx, staged)
+      }
+    // Prefer create for brand-new ids. When the identity already exists on disk
+    // (or briefly in the live store after models/set dispose), resume instead of
+    // failing with `session "…" already exists`.
+    let handle: AgentHandle
+    try {
+      handle = await this.ctx.agents.create({
+        sessionId: id,
+        meta: {
+          cwd: this.cwd,
+          ...staged === undefined ? {} : { agentPreset: staged },
         },
-    })
+        agentOptions,
+        ...setup === undefined ? {} : { setup },
+      })
+    } catch (error) {
+      if (!isSessionAlreadyExists(error)) throw error
+      handle = await this.ctx.agents.resume({
+        resumeSessionId: id,
+        agentOptions,
+        ...setup === undefined ? {} : { setup },
+      })
+    }
     const rec: SessionRecord = { handle }
     this.sessions.set(sessionId, rec)
     return rec
@@ -507,4 +576,10 @@ export class HarnessSdkJsonRpcServer {
   private hasAdapterFor(provider: string): boolean {
     return this.ctx.get('llm')?.listProviders().some(entry => entry.id === provider) ?? false
   }
+}
+
+/** Persistence create / in-store prepare collision for an already-known session id. */
+function isSessionAlreadyExists(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  return /session ".+" already exists/i.test(error.message)
 }

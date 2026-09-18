@@ -21,6 +21,9 @@
       "path": "../../sdk/approval-bridge"
     },
     {
+      "path": "../../sdk/assistant-stream-bridge"
+    },
+    {
       "path": "../../sdk/server"
     }
   ]

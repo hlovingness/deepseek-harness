@@ -17,6 +17,7 @@ describe('dsh-sdk-app bundle', () => {
     expect(manifest.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-sdk-jsonrpc-server')
     expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-sdk-approval-bridge')
+    expect(manifest.dependencies).toHaveProperty('@deepseek-ai/dsh-sdk-assistant-stream-bridge')
     const patches = yaml.load(
       readFileSync(resolve(root, manifest.dsh!.bundle!.patch!), 'utf8'),
       { schema: entryListSchema },
@@ -29,8 +30,13 @@ describe('dsh-sdk-app bundle', () => {
     const approvalBridge = rows.find(row => row.id === 'sdk-approval-bridge')
     expect(approvalBridge?.name).toBe('@deepseek-ai/dsh-sdk-approval-bridge')
     expect(approvalBridge?.inject).toEqual(['sdkJsonRpc'])
+    const streamBridge = rows.find(row => row.id === 'sdk-assistant-stream-bridge')
+    expect(streamBridge?.name).toBe('@deepseek-ai/dsh-sdk-assistant-stream-bridge')
+    expect(streamBridge?.inject).toEqual(['sdkJsonRpc'])
     const jsonRpcIndex = rows.findIndex(row => row.id === 'sdk-jsonrpc-server')
     const approvalIndex = rows.findIndex(row => row.id === 'sdk-approval-bridge')
+    const streamIndex = rows.findIndex(row => row.id === 'sdk-assistant-stream-bridge')
     expect(approvalIndex).toBeGreaterThan(jsonRpcIndex)
+    expect(streamIndex).toBeGreaterThan(jsonRpcIndex)
   })
 })

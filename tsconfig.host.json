@@ -326,6 +326,7 @@
     { "path": "./packages/boot/cmdline" },
     { "path": "./packages/sdk/server" },
     { "path": "./packages/sdk/approval-bridge" },
+    { "path": "./packages/sdk/assistant-stream-bridge" },
     { "path": "./packages/test-support/llm-replay" },
     { "path": "./packages/typert/generator" },
     { "path": "./packages/test-support/session-snapshot" },
