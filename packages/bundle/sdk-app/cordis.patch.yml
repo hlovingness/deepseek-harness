@@ -33,3 +33,6 @@
     - id: sdk-assistant-stream-bridge
       name: '@deepseek-ai/dsh-sdk-assistant-stream-bridge'
       inject: [sdkJsonRpc]
+
+- id: hmr
+  disabled: true
